@@ -85,7 +85,7 @@ func (r *defaultDeveloperRepository) GetByID(ctx context.Context, id int64) (*De
 		}
 		return nil, fmt.Errorf("querying developer ID %d: %w", id, err)
 	}
-	return nil, nil
+	return &developer, nil
 }
 
 func (r *defaultDeveloperRepository) Create(ctx context.Context, newDeveloper Developer) (*Developer, error) {

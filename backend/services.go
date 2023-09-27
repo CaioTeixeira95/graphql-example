@@ -19,12 +19,12 @@ func ListDevelopers(repository DeveloperRepository) graphql.FieldResolveFn {
 
 func DeveloperDetails(repository DeveloperRepository) graphql.FieldResolveFn {
 	return func(p graphql.ResolveParams) (interface{}, error) {
-		id, ok := p.Args["id"].(int64)
+		id, ok := p.Args["id"].(int)
 		if !ok {
 			return nil, nil
 		}
 
-		developer, err := repository.GetByID(p.Context, id)
+		developer, err := repository.GetByID(p.Context, int64(id))
 		if err != nil {
 			return nil, fmt.Errorf("getting developer ID %d: %w", id, err)
 		}
