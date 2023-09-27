@@ -1,22 +1,15 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
 	"net/http"
-	"time"
+	"os"
 
 	"github.com/graphql-go/graphql"
+	_ "github.com/lib/pq"
 )
-
-type Developer struct {
-	ID        int64     `json:"id"`
-	FirstName string    `json:"first_name"`
-	LastName  string    `json:"last_name"`
-	BirthDate time.Time `json:"birth_date"`
-	GithubURL string    `json:"github_url,omitempty"`
-	Stack     []string  `json:"stack,omitempty"`
-}
 
 // We define a type for the object we want to return
 var developerType = graphql.NewObject(
@@ -32,9 +25,6 @@ var developerType = graphql.NewObject(
 			"last_name": &graphql.Field{
 				Type: graphql.String,
 			},
-			"birth_date": &graphql.Field{
-				Type: graphql.DateTime,
-			},
 			"github_url": &graphql.Field{
 				Type: graphql.String,
 			},
@@ -46,8 +36,26 @@ var developerType = graphql.NewObject(
 )
 
 func main() {
-	// Step 1: define the query fields
-	fields := graphql.Fields{
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		log.Fatalf("DATABASE_URL is required")
+	}
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	if err = db.Ping(); err != nil {
+		log.Fatal(err)
+	}
+
+	repository := NewDefaultDeveloperRepository(db)
+
+	// Step 1: define the query and mutation fields
+	queryFields := graphql.Fields{
+		// http://localhost:8000/graphql?query={developers{first_name,last_name,stack}}
 		"developers": &graphql.Field{
 			Type:        graphql.NewList(developerType),
 			Description: "Get a list of developers",
@@ -59,18 +67,9 @@ func main() {
 					Type: graphql.String,
 				},
 			},
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				// Here we code how we get the resources
-				developer := Developer{
-					ID:        1,
-					FirstName: "Caio",
-					LastName:  "Teixeira",
-					BirthDate: time.Now(),
-					GithubURL: "https://github.com/CaioTeixeira95",
-				}
-				return []Developer{developer}, nil
-			},
+			Resolve: ListDevelopers(repository),
 		},
+		// http://localhost:8000/graphql?query={developer(id:1){first_name,last_name,stack}}
 		"developer": &graphql.Field{
 			Type:        developerType,
 			Description: "Get a single developers",
@@ -79,23 +78,62 @@ func main() {
 					Type: graphql.Int,
 				},
 			},
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				return Developer{
-					ID:        1,
-					FirstName: "Caio",
-					LastName:  "Teixeira",
-					BirthDate: time.Now(),
-					GithubURL: "https://github.com/CaioTeixeira95",
-				}, nil
-			},
+			Resolve: DeveloperDetails(repository),
 		},
 	}
 
-	// Step 2: create a query
-	query := graphql.NewObject(graphql.ObjectConfig{Name: "Query", Fields: fields})
+	mutationFields := graphql.Fields{
+		// http://localhost:8000/graphql?query=mutation+_{create(first_name:"Caio",last_name:"Teixeira",github_url:"https://github.com/CaioTeixeira95",stack:["go", "python"]){id,first_name,last_name,github_url,stack}}
+		"create": &graphql.Field{
+			Type:        developerType,
+			Description: "Create new developer",
+			Args: graphql.FieldConfigArgument{
+				"first_name": &graphql.ArgumentConfig{
+					Type: graphql.String,
+				},
+				"last_name": &graphql.ArgumentConfig{
+					Type: graphql.String,
+				},
+				"github_url": &graphql.ArgumentConfig{
+					Type: graphql.String,
+				},
+				"stack": &graphql.ArgumentConfig{
+					Type: graphql.NewList(graphql.String),
+				},
+			},
+			Resolve: CreateDeveloper(repository),
+		},
+		// http://localhost:8000/graphql?query=mutation+_{update(id:1,first_name:"Caio",last_name:"Teixeira",github_url:"https://github.com/CaioTeixeira95",stack:["go", "python"]){id,first_name,last_name,github_url,stack}}
+		"update": &graphql.Field{
+			Type:        developerType,
+			Description: "Update a developer",
+			Args: graphql.FieldConfigArgument{
+				"id": &graphql.ArgumentConfig{
+					Type: graphql.Int,
+				},
+				"first_name": &graphql.ArgumentConfig{
+					Type: graphql.String,
+				},
+				"last_name": &graphql.ArgumentConfig{
+					Type: graphql.String,
+				},
+				"github_url": &graphql.ArgumentConfig{
+					Type: graphql.String,
+				},
+				"stack": &graphql.ArgumentConfig{
+					Type: graphql.NewList(graphql.String),
+				},
+			},
+			Resolve: UpdateDeveloper(repository),
+		},
+	}
 
-	// Step 3: create a schema config and create a schema
-	schemaConfig := graphql.SchemaConfig{Query: query}
+	// Step 2: create a query and mutation
+	query := graphql.NewObject(graphql.ObjectConfig{Name: "Query", Fields: queryFields})
+	mutation := graphql.NewObject(graphql.ObjectConfig{Name: "Mutation", Fields: mutationFields})
+
+	// Step 3: create a schema config and a schema
+	schemaConfig := graphql.SchemaConfig{Query: query, Mutation: mutation}
 	schema, err := graphql.NewSchema(schemaConfig)
 	if err != nil {
 		log.Fatalf("failed to create new schema, error: %v", err)
@@ -104,10 +142,11 @@ func main() {
 	http.HandleFunc("/graphql", func(rw http.ResponseWriter, req *http.Request) {
 		query := req.URL.Query().Get("query")
 
-		// Step 4: execute the query based on the query string sent by the client. If empty it returns error.
+		// Step 4: execute the query based on the query string sent by the client. If the request string is empty an error is returned.
 		res := graphql.Do(graphql.Params{
 			Schema:        schema,
 			RequestString: query,
+			Context:       req.Context(),
 		})
 
 		rw.Header().Set("Content-Type", "application/json")
@@ -122,5 +161,7 @@ func main() {
 	})
 
 	log.Println("server running at http://localhost:8000")
-	http.ListenAndServe(":8000", nil)
+	if err = http.ListenAndServe(":8000", nil); err != nil {
+		log.Fatal(err)
+	}
 }
